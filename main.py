@@ -1,4 +1,8 @@
+from dotenv import load_dotenv
 import os
+
+load_dotenv()
+
 import json
 import random
 from datetime import datetime, timedelta, time
@@ -56,19 +60,19 @@ KOLOSSEO_MAPS = [
 
 DUNGEONS = [
     {"name": "Conte Harembourg", "difficulty": "Difficilissimo", "reward": 2500000, "weight": 10},
-    {"name": "Missiz Freezz", "difficulty": "Alta", "reward": 1000000, "weight": 45},
-    {"name": "Klime", "difficulty": "Alta", "reward": 1000000, "weight": 45},
-    {"name": "Sylargh", "difficulty": "Alta", "reward": 1000000, "weight": 45},
+    {"name": "Missiz Freezz", "difficulty": "Alta", "reward": 1000000, "weight": 50},
+    {"name": "Klime", "difficulty": "Alta", "reward": 1000000, "weight": 50},
+    {"name": "Sylargh", "difficulty": "Alta", "reward": 1000000, "weight": 50},
     {"name": "Nileza", "difficulty": "Alta", "reward": 1500000, "weight": 45},
     {"name": "Wind Dojo", "difficulty": "Media", "reward": 1000000, "weight": 80},
     {"name": "Celestial Bearbarian", "difficulty": "Media", "reward": 800000, "weight": 80},
     {"name": "Katamashi", "difficulty": "Media", "reward": 800000, "weight": 80},
     {"name": "Damadrya", "difficulty": "Media", "reward": 800000, "weight": 80},
     {"name": "Fuji + Tengu", "difficulty": "Media", "reward": 800000, "weight": 80},
-    {"name": "Korriander", "difficulty": "Easy", "reward": 600000, "weight": 120},
-    {"name": "Sakai Miniera", "difficulty": "Easy", "reward": 600000, "weight": 120},
-    {"name": "Kolosso", "difficulty": "Easy", "reward": 600000, "weight": 120},
-    {"name": "Tanukoi San", "difficulty": "Easy", "reward": 600000, "weight": 120},
+    {"name": "Korriander", "difficulty": "Easy", "reward": 600000, "weight": 100},
+    {"name": "Sakai Miniera", "difficulty": "Easy", "reward": 600000, "weight": 100},
+    {"name": "Kolosso", "difficulty": "Easy", "reward": 600000, "weight": 100},
+    {"name": "Tanukoi San", "difficulty": "Easy", "reward": 600000, "weight": 100},
 ]
 
 
@@ -131,7 +135,7 @@ def get_reward_for_champion_level(level: int) -> int:
     return 100000
 
 
-def admin_only() -> app_commands.Check:
+def admin_only():
     return app_commands.checks.has_permissions(administrator=True)
 
 
@@ -152,9 +156,15 @@ def default_state() -> Dict[str, Any]:
     return {
         "current_week": None,
         "active_challenge": None,
+        "forced_next_challenge": None,
         "state": "idle",  # idle | open | signup_closed | completed
         "last_opened_at": None,
         "challenge_history": [],
+        "automation_enabled": True,
+        "editions": {
+            "dungeon": 0,
+            "kolosseo": 0,
+        },
         "auto": {
             "next_weekly_open": None,
             "next_kolosseo_close": None,
@@ -170,6 +180,7 @@ def default_state() -> Dict[str, Any]:
             "result_message_id": None,
         },
         "dungeon": {
+            "edition": 0,
             "name": None,
             "difficulty": None,
             "reward": 0,
@@ -179,6 +190,7 @@ def default_state() -> Dict[str, Any]:
             "closed_at": None,
         },
         "kolosseo": {
+            "edition": 0,
             "signup_open": False,
             "participants": [],
             "challengers": [],
@@ -214,8 +226,14 @@ def load_state() -> None:
     state.setdefault("messages", {})
     state["messages"]["channel_id"] = CHALLENGE_CHANNEL_ID
     state.setdefault("challenge_history", [])
+    state.setdefault("automation_enabled", True)
+    state.setdefault("forced_next_challenge", None)
+    state.setdefault("editions", {"dungeon": 0, "kolosseo": 0})
     state.setdefault("kolosseo", {})
     state["kolosseo"].setdefault("selected_map", None)
+    state["kolosseo"].setdefault("edition", 0)
+    state.setdefault("dungeon", {})
+    state["dungeon"].setdefault("edition", 0)
 
 
 def ensure_auto_schedule() -> None:
@@ -256,15 +274,15 @@ async def fetch_message_if_possible(message_id: Optional[int]) -> Optional[disco
 
 def build_dungeon_open_embed() -> discord.Embed:
     dungeon = state["dungeon"]
+    edition = dungeon.get("edition", 0)
     embed = discord.Embed(
-        title="🏛️ Sfida Settimanale — Dungeon Rush",
+        title=f"🏛️ Sfida Settimanale — Dungeon Rush | Edizione {edition}",
         description=(
-            "La sfida settimanale è iniziata.\n"
-            "Questa settimana i membri di IMPERIVM dovranno completare il dungeon "
-            "sorteggiato nel minor tempo possibile."
+            "La sfida settimanale è iniziata.\n\n"
+            "Questa settimana i membri di IMPERIVM dovranno completare "
+            "l’ultima sala del dungeon sorteggiato nel miglior tempo possibile."
         ),
         color=discord.Color.red(),
-        timestamp=now_rome(),
     )
     embed.add_field(name="Dungeon sorteggiato", value=dungeon["name"], inline=False)
     embed.add_field(name="Difficoltà", value=dungeon["difficulty"], inline=True)
@@ -276,117 +294,110 @@ def build_dungeon_open_embed() -> discord.Embed:
             "• Max 4 partecipanti per team\n"
             "• NO multi-account\n"
             "• NO Heroes Mode\n"
-            "• Screen del tempo finale obbligatorio"
+            "• Screen del tempo finale obbligatorio (ultima sala)"
         ),
         inline=False,
     )
-    embed.set_footer(text="La chiusura della sfida e l'annuncio vincitori saranno gestiti manualmente dallo staff.")
     return embed
 
 
 def build_dungeon_final_embed() -> discord.Embed:
     dungeon = state["dungeon"]
+    edition = dungeon.get("edition", 0)
     winners = dungeon.get("winners", [])
     winners_text = "\n".join(mention_user(uid) for uid in winners) if winners else "—"
 
     embed = discord.Embed(
-        title="🏁 Dungeon Rush — Vincitori Ufficiali",
-        description="La sfida settimanale si è conclusa. Ecco il team vincitore.",
+        title=f"🏁 Dungeon Rush — Vincitori Ufficiali | Edizione {edition}",
+        description=(
+            "La sfida settimanale si è conclusa.\n\n"
+            "Ecco il team che ha registrato il miglior tempo."
+        ),
         color=discord.Color.gold(),
-        timestamp=now_rome(),
     )
     embed.add_field(name="Dungeon", value=dungeon.get("name") or "—", inline=False)
     embed.add_field(name="Vincitori", value=winners_text, inline=False)
-    embed.add_field(name="Tempo registrato", value=dungeon.get("time") or "—", inline=True)
+    embed.add_field(name="Miglior tempo", value=dungeon.get("time") or "—", inline=True)
     embed.add_field(name="Premio", value=fmt_kama(int(dungeon.get("reward") or 0)), inline=True)
     return embed
 
 
 def build_kolosseo_open_embed() -> discord.Embed:
     kol = state["kolosseo"]
+    edition = kol.get("edition", 0)
     champ_id = kol.get("current_champion_id")
-    level = int(kol.get("champion_level") or 0)
     reward = int(kol.get("reward_per_win") or 100000)
 
     if champ_id:
         description = (
-            "Il campione attuale è pronto a difendere il titolo.\n"
-            "Le iscrizioni sono aperte solo per gli sfidanti."
+            "Le iscrizioni al Kolosseo sono aperte.\n\n"
+            f"👑 Campione in carica\n{mention_user(champ_id)}\n\n"
+            "Il Campione dovrà difendere il titolo.\n"
+            "Tra gli iscritti verranno sorteggiati 3 Sfidanti."
         )
     else:
         description = (
-            "Le iscrizioni al Kolosseo sono aperte.\n"
-            "Non esiste ancora un campione: tra gli iscritti verranno sorteggiati "
-            "1 Campione e 3 Sfidanti."
+            "Le iscrizioni al Kolosseo sono aperte.\n\n"
+            "Tra gli iscritti verranno sorteggiati 1 Campione e 3 Sfidanti."
         )
 
     embed = discord.Embed(
-        title="⚔️ Sfida Settimanale — Kolosseo",
+        title=f"⚔️ Sfida Settimanale — Kolosseo | Edizione {edition}",
         description=description,
         color=discord.Color.dark_red(),
-        timestamp=now_rome(),
     )
     embed.add_field(name="Iscrizioni aperte fino a", value="Martedì ore 08:00", inline=True)
     embed.add_field(name="Come partecipare", value="Premi il pulsante qui sotto", inline=True)
-
-    if champ_id:
-        embed.add_field(name="Campione attuale", value=mention_user(champ_id), inline=False)
-        embed.add_field(name="Livello campione", value=str(level), inline=True)
-        embed.add_field(name="Premio attuale per ogni fight vinto", value=fmt_kama(reward), inline=True)
-    else:
-        embed.add_field(name="Premio attuale per ogni fight vinto", value=fmt_kama(100000), inline=False)
-
-    embed.set_footer(text="Alla chiusura delle iscrizioni il bot sorteggerà automaticamente partecipanti e mappa.")
+    embed.add_field(name="Premio per ogni vittoria", value=fmt_kama(reward), inline=False)
+    embed.add_field(name="Iscritti attuali", value=str(len(kol.get('participants', []))), inline=False)
     return embed
 
 
 def build_kolosseo_closed_embed() -> discord.Embed:
+    edition = state["kolosseo"].get("edition", 0)
     return discord.Embed(
-        title="🏛️ Iscrizioni Chiuse — Kolosseo",
-        description="Le iscrizioni al Kolosseo sono terminate. Il sorteggio dei partecipanti è stato completato.",
+        title=f"⚔️ Kolosseo — Sorteggio Completato | Edizione {edition}",
+        description="Le iscrizioni al Kolosseo sono terminate.\n\nIl sorteggio è stato completato.",
         color=discord.Color.orange(),
-        timestamp=now_rome(),
     )
 
 
 def build_kolosseo_draw_embed() -> discord.Embed:
     kol = state["kolosseo"]
+    edition = kol.get("edition", 0)
     champ_id = kol.get("current_champion_id")
     challengers = kol.get("challengers", [])
     reward = int(kol.get("reward_per_win") or 100000)
-    level = int(kol.get("champion_level") or 0)
     selected_map = kol.get("selected_map") or "—"
 
+    challengers_text = "\n".join(mention_user(uid) for uid in challengers) if challengers else "—"
+
     embed = discord.Embed(
-        title="👑 Difesa del Trono — Kolosseo",
-        description="Il sorteggio è completato. I fight potranno essere disputati da ora fino a domenica 12:00.",
+        title=f"⚔️ Kolosseo — Sorteggio Completato | Edizione {edition}",
+        description=(
+            "Le iscrizioni al Kolosseo sono terminate.\n\n"
+            "Il Campione è pronto a difendere il titolo.\n"
+            "Gli Sfidanti sono stati scelti."
+        ),
         color=discord.Color.blurple(),
-        timestamp=now_rome(),
     )
-    embed.add_field(name="Campione", value=mention_user(champ_id), inline=False)
-    embed.add_field(name="Livello campione", value=str(level), inline=True)
-    embed.add_field(name="Premio attuale per ogni fight vinto", value=fmt_kama(reward), inline=True)
-    embed.add_field(name="Mappa sorteggiata", value=selected_map, inline=False)
-
-    for idx, user_id in enumerate(challengers, start=1):
-        embed.add_field(name=f"Sfidante {idx}", value=mention_user(user_id), inline=False)
-
-    if not challengers:
-        embed.add_field(name="Sfidanti", value="Nessuno sorteggiato", inline=False)
-
+    embed.add_field(name="👑 Campione in carica", value=mention_user(champ_id), inline=False)
+    embed.add_field(name="⚔️ Sfidanti", value=challengers_text, inline=False)
+    embed.add_field(name="🗺️ Mappa", value=selected_map, inline=False)
+    embed.add_field(name="Premio per ogni vittoria", value=fmt_kama(reward), inline=False)
     embed.add_field(name="Scadenza fight", value="Domenica ore 12:00", inline=False)
     return embed
 
 
 def build_kolosseo_final_embed(final_champion_id: int) -> discord.Embed:
     kol = state["kolosseo"]
+    edition = kol.get("edition", 0)
     embed = discord.Embed(
-        title="🏁 Kolosseo — Campione Ufficiale",
-        description="L'edizione settimanale del Kolosseo si è conclusa.",
+        title=f"🏆 Kolosseo — Campione Ufficiale | Edizione {edition}",
+        description="Il Kolosseo si è concluso.\n\nUn nuovo Campione è emerso dall’arena.",
         color=discord.Color.green(),
-        timestamp=now_rome(),
     )
-    embed.add_field(name="Campione ufficiale", value=mention_user(final_champion_id), inline=False)
+    embed.add_field(name="Campione", value=mention_user(final_champion_id), inline=False)
     embed.add_field(name="Livello attuale", value=str(kol.get("champion_level") or 1), inline=True)
     embed.add_field(
         name="Premio attuale per ogni fight vinto",
@@ -429,7 +440,18 @@ class KolosseoSignupView(discord.ui.View):
 
         participants.append(interaction.user.id)
         save_state()
-        await interaction.response.send_message("Iscrizione registrata con successo.", ephemeral=True)
+
+        message = await fetch_message_if_possible(state["messages"].get("signup_message_id"))
+        if message:
+            try:
+                await message.edit(embed=build_kolosseo_open_embed(), view=KolosseoSignupView(disabled=False))
+            except Exception:
+                pass
+
+        await interaction.response.send_message(
+            f"✅ Iscrizione al Kolosseo registrata con successo.\n\nEdizione: {state['kolosseo'].get('edition', 0)}",
+            ephemeral=True,
+        )
 
 
 async def send_embed(embed: discord.Embed, view: Optional[discord.ui.View] = None) -> Optional[int]:
@@ -451,6 +473,7 @@ def reset_week_runtime_data(keep_champion: bool = True) -> None:
     state["messages"]["result_message_id"] = None
 
     state["dungeon"] = {
+        "edition": state["editions"].get("dungeon", 0),
         "name": None,
         "difficulty": None,
         "reward": 0,
@@ -461,6 +484,7 @@ def reset_week_runtime_data(keep_champion: bool = True) -> None:
     }
 
     state["kolosseo"] = {
+        "edition": state["editions"].get("kolosseo", 0),
         "signup_open": False,
         "participants": [],
         "challengers": [],
@@ -495,7 +519,12 @@ async def open_weekly_challenge(challenge_type: Optional[str] = None, is_test: b
     state["last_opened_at"] = now_rome().isoformat()
 
     if challenge_type not in CHALLENGE_TYPES:
-        challenge_type = choose_weekly_challenge()
+        forced = state.get("forced_next_challenge")
+        if forced in CHALLENGE_TYPES:
+            challenge_type = forced
+            state["forced_next_challenge"] = None
+        else:
+            challenge_type = choose_weekly_challenge()
 
     state["active_challenge"] = challenge_type
     state["state"] = "open"
@@ -503,8 +532,10 @@ async def open_weekly_challenge(challenge_type: Optional[str] = None, is_test: b
     state["challenge_history"] = state["challenge_history"][-20:]
 
     if challenge_type == "dungeon":
+        state["editions"]["dungeon"] = int(state["editions"].get("dungeon", 0)) + 1
         dungeon = weighted_choice(DUNGEONS, "weight")
         state["dungeon"] = {
+            "edition": state["editions"]["dungeon"],
             "name": dungeon["name"],
             "difficulty": dungeon["difficulty"],
             "reward": dungeon["reward"],
@@ -521,6 +552,8 @@ async def open_weekly_challenge(challenge_type: Optional[str] = None, is_test: b
         state["auto"]["next_kolosseo_close"] = None
 
     elif challenge_type == "kolosseo":
+        state["editions"]["kolosseo"] = int(state["editions"].get("kolosseo", 0)) + 1
+        state["kolosseo"]["edition"] = state["editions"]["kolosseo"]
         state["kolosseo"]["signup_open"] = True
         state["kolosseo"]["opened_at"] = now_rome().isoformat()
 
@@ -564,7 +597,7 @@ async def close_kolosseo_signups_and_draw() -> Dict[str, Any]:
         channel = await get_target_channel()
         if channel:
             await channel.send(
-                f"⚠️ Iscrizioni Kolosseo chiuse, ma partecipanti insufficienti. Minimo richiesto: **{min_needed}**."
+                f"⚠️ Iscrizioni chiuse, ma non ci sono abbastanza partecipanti per avviare il Kolosseo.\n**Minimo richiesto: {min_needed}.**"
             )
         return {"ok": False, "reason": "Partecipanti insufficienti."}
 
@@ -663,24 +696,25 @@ async def scheduler_loop() -> None:
             state["tests"]["scheduled_close"] = None
             save_state()
 
-    weekly_open = state.get("auto", {}).get("next_weekly_open")
-    if weekly_open:
-        dt = datetime.fromisoformat(weekly_open)
-        if current >= dt:
-            await open_weekly_challenge(None, is_test=False)
-            save_state()
+    if state.get("automation_enabled", True):
+        weekly_open = state.get("auto", {}).get("next_weekly_open")
+        if weekly_open:
+            dt = datetime.fromisoformat(weekly_open)
+            if current >= dt:
+                await open_weekly_challenge(None, is_test=False)
+                save_state()
 
-    kol_close = state.get("auto", {}).get("next_kolosseo_close")
-    if (
-        kol_close
-        and state.get("active_challenge") == "kolosseo"
-        and state["kolosseo"].get("signup_open")
-    ):
-        dt = datetime.fromisoformat(kol_close)
-        if current >= dt:
-            await close_kolosseo_signups_and_draw()
-            state["auto"]["next_kolosseo_close"] = None
-            save_state()
+        kol_close = state.get("auto", {}).get("next_kolosseo_close")
+        if (
+            kol_close
+            and state.get("active_challenge") == "kolosseo"
+            and state["kolosseo"].get("signup_open")
+        ):
+            dt = datetime.fromisoformat(kol_close)
+            if current >= dt:
+                await close_kolosseo_signups_and_draw()
+                state["auto"]["next_kolosseo_close"] = None
+                save_state()
 
 
 @scheduler_loop.before_loop
@@ -746,7 +780,10 @@ async def sfida_status(interaction: discord.Interaction):
         f"**Settimana:** {week}\n"
         f"**Sfida attiva:** {active}\n"
         f"**Stato:** {st}\n"
+        f"**Automazione:** {'ON' if state.get('automation_enabled', True) else 'OFF'}\n"
         f"**Storico ultime sfide:** {', '.join(history[-5:]) if history else '—'}\n"
+        f"**Edizione Dungeon:** {state.get('editions', {}).get('dungeon', 0)}\n"
+        f"**Edizione Kolosseo:** {state.get('editions', {}).get('kolosseo', 0)}\n"
         f"**Prossima apertura automatica:** {fmt_dt(datetime.fromisoformat(next_open)) if next_open else '—'}\n"
         f"**Prossima chiusura automatica Kolosseo:** {fmt_dt(datetime.fromisoformat(next_close)) if next_close else '—'}\n"
         f"**Campione attuale:** {mention_user(kol.get('current_champion_id')) if kol.get('current_champion_id') else '—'}\n"
@@ -757,6 +794,60 @@ async def sfida_status(interaction: discord.Interaction):
         f"**Test chiusura schedulata:** {fmt_dt(datetime.fromisoformat(test_close['run_at'])) if test_close else '—'}"
     )
     await interaction.response.send_message(text, ephemeral=True)
+
+
+@bot.tree.command(
+    name="automation_on",
+    description="Attiva l'automazione del bot.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+async def automation_on(interaction: discord.Interaction):
+    state["automation_enabled"] = True
+    save_state()
+    await interaction.response.send_message("Automazione attivata.", ephemeral=True)
+
+
+@bot.tree.command(
+    name="automation_off",
+    description="Disattiva l'automazione del bot.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+async def automation_off(interaction: discord.Interaction):
+    state["automation_enabled"] = False
+    save_state()
+    await interaction.response.send_message("Automazione disattivata.", ephemeral=True)
+
+
+@bot.tree.command(
+    name="automation_status",
+    description="Mostra lo stato dell'automazione.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+async def automation_status(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        f"Automazione: {'ON' if state.get('automation_enabled', True) else 'OFF'}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="set_weekly_challenge",
+    description="Forza la prossima sfida settimanale.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+@app_commands.describe(tipo="dungeon oppure kolosseo")
+async def set_weekly_challenge(interaction: discord.Interaction, tipo: str):
+    tipo = tipo.lower().strip()
+    if tipo not in CHALLENGE_TYPES:
+        await interaction.response.send_message("Tipo non valido. Usa: dungeon o kolosseo.", ephemeral=True)
+        return
+    state["forced_next_challenge"] = tipo
+    save_state()
+    await interaction.response.send_message(f"La prossima sfida settimanale sarà forzata su: **{tipo}**.", ephemeral=True)
 
 
 @bot.tree.command(
@@ -928,6 +1019,37 @@ async def dungeon_start(interaction: discord.Interaction):
 
 
 @bot.tree.command(
+    name="dungeon_set",
+    description="Imposta manualmente il dungeon corrente.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+@app_commands.describe(nome="Nome esatto del dungeon")
+async def dungeon_set(interaction: discord.Interaction, nome: str):
+    if state.get("active_challenge") != "dungeon":
+        await interaction.response.send_message("Non c'è un Dungeon Rush attivo.", ephemeral=True)
+        return
+
+    dungeon = next((d for d in DUNGEONS if d["name"].lower() == nome.lower()), None)
+    if not dungeon:
+        available = ", ".join(d["name"] for d in DUNGEONS)
+        await interaction.response.send_message(f"Dungeon non trovato. Disponibili: {available}", ephemeral=True)
+        return
+
+    state["dungeon"]["name"] = dungeon["name"]
+    state["dungeon"]["difficulty"] = dungeon["difficulty"]
+    state["dungeon"]["reward"] = dungeon["reward"]
+    save_state()
+
+    embed = build_dungeon_open_embed()
+    await send_embed(embed)
+    await interaction.response.send_message(
+        f"Dungeon impostato manualmente: **{dungeon['name']}** — premio **{fmt_kama(dungeon['reward'])}**.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
     name="dungeon_reroll",
     description="Riestrae il dungeon corrente.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
@@ -998,6 +1120,72 @@ async def kolosseo_open(interaction: discord.Interaction):
 
 
 @bot.tree.command(
+    name="kolosseo_iscritti",
+    description="Mostra gli iscritti attuali al Kolosseo.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+async def kolosseo_iscritti(interaction: discord.Interaction):
+    participants = state.get("kolosseo", {}).get("participants", [])
+    if not participants:
+        await interaction.response.send_message("Nessun iscritto al Kolosseo.", ephemeral=True)
+        return
+
+    text = "\n".join(mention_user(uid) for uid in participants)
+    await interaction.response.send_message(f"**Iscritti Kolosseo:**\n{text}", ephemeral=True)
+
+
+@bot.tree.command(
+    name="kolosseo_set_map",
+    description="Imposta manualmente la mappa del Kolosseo.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+@app_commands.describe(nome="Nome esatto della mappa")
+async def kolosseo_set_map(interaction: discord.Interaction, nome: str):
+    if nome not in KOLOSSEO_MAPS:
+        await interaction.response.send_message(
+            f"Mappa non valida. Disponibili: {', '.join(KOLOSSEO_MAPS)}",
+            ephemeral=True,
+        )
+        return
+    state["kolosseo"]["selected_map"] = nome
+    save_state()
+    await interaction.response.send_message(f"Mappa Kolosseo impostata: **{nome}**.", ephemeral=True)
+
+
+@bot.tree.command(
+    name="kolosseo_set_champion",
+    description="Imposta manualmente il campione del Kolosseo.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+@app_commands.describe(campione="Utente da impostare come campione")
+async def kolosseo_set_champion(interaction: discord.Interaction, campione: discord.Member):
+    state["kolosseo"]["current_champion_id"] = campione.id
+    state["kolosseo"]["current_champion_name"] = str(campione.id)
+    save_state()
+    await interaction.response.send_message(f"Campione Kolosseo impostato: {campione.mention}", ephemeral=True)
+
+
+@bot.tree.command(
+    name="kolosseo_set_level",
+    description="Imposta manualmente il livello del campione.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+@app_commands.describe(livello="Livello campione (1-10)")
+async def kolosseo_set_level(interaction: discord.Interaction, livello: app_commands.Range[int, 1, 10]):
+    state["kolosseo"]["champion_level"] = livello
+    state["kolosseo"]["reward_per_win"] = get_reward_for_champion_level(livello)
+    save_state()
+    await interaction.response.send_message(
+        f"Livello campione impostato a **{livello}**. Premio attuale: **{fmt_kama(state['kolosseo']['reward_per_win'])}**.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
     name="kolosseo_close",
     description="Chiude manualmente le iscrizioni del Kolosseo e fa il sorteggio.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
@@ -1036,6 +1224,7 @@ async def kolosseo_status(interaction: discord.Interaction):
     challengers = kol.get("challengers", [])
 
     text = (
+        f"**Edizione:** {kol.get('edition', 0)}\n"
         f"**Campione:** {mention_user(kol.get('current_champion_id')) if kol.get('current_champion_id') else '—'}\n"
         f"**Livello campione:** {kol.get('champion_level', 0)}\n"
         f"**Premio attuale per fight:** {fmt_kama(int(kol.get('reward_per_win') or 100000))}\n"
