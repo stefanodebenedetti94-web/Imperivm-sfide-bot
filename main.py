@@ -20,6 +20,7 @@ from discord import app_commands
 # ============================================================
 
 TZ = ZoneInfo("Europe/Rome")
+AUTOMATION_GRACE_MINUTES = 10
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 GUILD_ID = int(os.getenv("GUILD_ID", "0") or 0)
@@ -125,6 +126,10 @@ def next_tuesday_8_from(dt: Optional[datetime] = None) -> datetime:
     return candidate
 
 
+def is_within_grace_window(current: datetime, scheduled: datetime, minutes: int = AUTOMATION_GRACE_MINUTES) -> bool:
+    return scheduled <= current <= (scheduled + timedelta(minutes=minutes))
+
+
 def get_reward_for_champion_level(level: int) -> int:
     if level >= 10:
         return 500000
@@ -152,6 +157,21 @@ def choose_weekly_challenge() -> str:
     )["name"]
 
 
+def preview_next_challenge_logic() -> str:
+    forced = state.get("forced_next_challenge")
+    if forced in CHALLENGE_TYPES:
+        return f"Forzata manualmente: {forced}"
+
+    history = state.get("challenge_history", [])
+    if len(history) >= 2:
+        last_two = history[-2:]
+        if last_two[0] == last_two[1]:
+            forced_by_rule = "dungeon" if last_two[0] == "kolosseo" else "kolosseo"
+            return f"Forzata da anti-ripetizione: {forced_by_rule}"
+
+    return "Non ancora determinata (50/50)"
+
+
 def default_state() -> Dict[str, Any]:
     return {
         "current_week": None,
@@ -168,6 +188,8 @@ def default_state() -> Dict[str, Any]:
         "auto": {
             "next_weekly_open": None,
             "next_kolosseo_close": None,
+            "last_weekly_open_run_for": None,
+            "last_kolosseo_close_run_for": None,
         },
         "tests": {
             "scheduled_open": None,
@@ -229,6 +251,11 @@ def load_state() -> None:
     state.setdefault("automation_enabled", True)
     state.setdefault("forced_next_challenge", None)
     state.setdefault("editions", {"dungeon": 0, "kolosseo": 0})
+    state.setdefault("auto", {})
+    state["auto"].setdefault("next_weekly_open", None)
+    state["auto"].setdefault("next_kolosseo_close", None)
+    state["auto"].setdefault("last_weekly_open_run_for", None)
+    state["auto"].setdefault("last_kolosseo_close_run_for", None)
     state.setdefault("kolosseo", {})
     state["kolosseo"].setdefault("selected_map", None)
     state["kolosseo"].setdefault("edition", 0)
@@ -700,8 +727,18 @@ async def scheduler_loop() -> None:
         weekly_open = state.get("auto", {}).get("next_weekly_open")
         if weekly_open:
             dt = datetime.fromisoformat(weekly_open)
-            if current >= dt:
+            already_run_for = state["auto"].get("last_weekly_open_run_for")
+            if (
+                is_within_grace_window(current, dt)
+                and already_run_for != weekly_open
+                and state.get("state") not in {"open", "signup_closed"}
+            ):
                 await open_weekly_challenge(None, is_test=False)
+                state["auto"]["last_weekly_open_run_for"] = weekly_open
+                save_state()
+            elif current > dt + timedelta(minutes=AUTOMATION_GRACE_MINUTES) and already_run_for != weekly_open:
+                state["auto"]["next_weekly_open"] = next_monday_8(current + timedelta(minutes=1)).isoformat()
+                state["auto"]["last_weekly_open_run_for"] = weekly_open
                 save_state()
 
         kol_close = state.get("auto", {}).get("next_kolosseo_close")
@@ -711,9 +748,14 @@ async def scheduler_loop() -> None:
             and state["kolosseo"].get("signup_open")
         ):
             dt = datetime.fromisoformat(kol_close)
-            if current >= dt:
+            already_run_for = state["auto"].get("last_kolosseo_close_run_for")
+            if is_within_grace_window(current, dt) and already_run_for != kol_close:
                 await close_kolosseo_signups_and_draw()
                 state["auto"]["next_kolosseo_close"] = None
+                state["auto"]["last_kolosseo_close_run_for"] = kol_close
+                save_state()
+            elif current > dt + timedelta(minutes=AUTOMATION_GRACE_MINUTES) and already_run_for != kol_close:
+                state["auto"]["last_kolosseo_close_run_for"] = kol_close
                 save_state()
 
 
@@ -761,11 +803,11 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 
 @bot.tree.command(
-    name="sfida_status",
+    name="stato_sfida",
     description="Mostra lo stato attuale della sfida.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
-async def sfida_status(interaction: discord.Interaction):
+async def stato_sfida(interaction: discord.Interaction):
     active = state.get("active_challenge") or "nessuna"
     st = state.get("state") or "idle"
     week = state.get("current_week") or "—"
@@ -797,36 +839,36 @@ async def sfida_status(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="automation_on",
+    name="automazione_on",
     description="Attiva l'automazione del bot.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def automation_on(interaction: discord.Interaction):
+async def automazione_on(interaction: discord.Interaction):
     state["automation_enabled"] = True
     save_state()
     await interaction.response.send_message("Automazione attivata.", ephemeral=True)
 
 
 @bot.tree.command(
-    name="automation_off",
+    name="automazione_off",
     description="Disattiva l'automazione del bot.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def automation_off(interaction: discord.Interaction):
+async def automazione_off(interaction: discord.Interaction):
     state["automation_enabled"] = False
     save_state()
     await interaction.response.send_message("Automazione disattivata.", ephemeral=True)
 
 
 @bot.tree.command(
-    name="automation_status",
+    name="stato_automazione",
     description="Mostra lo stato dell'automazione.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def automation_status(interaction: discord.Interaction):
+async def stato_automazione(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"Automazione: {'ON' if state.get('automation_enabled', True) else 'OFF'}",
         ephemeral=True,
@@ -834,13 +876,13 @@ async def automation_status(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="set_weekly_challenge",
+    name="set_prossima_sfida",
     description="Forza la prossima sfida settimanale.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(tipo="dungeon oppure kolosseo")
-async def set_weekly_challenge(interaction: discord.Interaction, tipo: str):
+async def set_prossima_sfida(interaction: discord.Interaction, tipo: str):
     tipo = tipo.lower().strip()
     if tipo not in CHALLENGE_TYPES:
         await interaction.response.send_message("Tipo non valido. Usa: dungeon o kolosseo.", ephemeral=True)
@@ -851,13 +893,75 @@ async def set_weekly_challenge(interaction: discord.Interaction, tipo: str):
 
 
 @bot.tree.command(
-    name="sfida_force_start",
+    name="anteprima_prossima_sfida",
+    description="Mostra come verrà scelta la prossima sfida.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+async def anteprima_prossima_sfida(interaction: discord.Interaction):
+    await interaction.response.send_message(preview_next_challenge_logic(), ephemeral=True)
+
+
+@bot.tree.command(
+    name="set_edizione",
+    description="Imposta manualmente l'edizione di dungeon o kolosseo.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+@app_commands.describe(tipo="dungeon oppure kolosseo", numero="Numero edizione")
+async def set_edizione(interaction: discord.Interaction, tipo: str, numero: app_commands.Range[int, 0, 9999]):
+    tipo = tipo.lower().strip()
+    if tipo not in ["dungeon", "kolosseo"]:
+        await interaction.response.send_message("Tipo non valido. Usa: dungeon o kolosseo.", ephemeral=True)
+        return
+
+    state["editions"][tipo] = numero
+    if tipo == "dungeon":
+        state["dungeon"]["edition"] = numero
+    else:
+        state["kolosseo"]["edition"] = numero
+    save_state()
+    await interaction.response.send_message(f"Edizione {tipo} impostata a **{numero}**.", ephemeral=True)
+
+
+@bot.tree.command(
+    name="stato_edizioni",
+    description="Mostra le edizioni attuali.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+async def stato_edizioni(interaction: discord.Interaction):
+    text = (
+        f"**Edizione Dungeon:** {state.get('editions', {}).get('dungeon', 0)}\n"
+        f"**Edizione Kolosseo:** {state.get('editions', {}).get('kolosseo', 0)}"
+    )
+    await interaction.response.send_message(text, ephemeral=True)
+
+
+@bot.tree.command(
+    name="reset_stato_sfida",
+    description="Resetta solo lo stato generale della sfida.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+async def reset_stato_sfida(interaction: discord.Interaction):
+    state["active_challenge"] = None
+    state["state"] = "idle"
+    state["auto"]["next_kolosseo_close"] = None
+    state["tests"]["scheduled_open"] = None
+    state["tests"]["scheduled_close"] = None
+    save_state()
+    await interaction.response.send_message("Stato sfida resettato.", ephemeral=True)
+
+
+@bot.tree.command(
+    name="apri_sfida",
     description="Forza l'apertura manuale di una sfida.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(tipo="dungeon oppure kolosseo")
-async def sfida_force_start(interaction: discord.Interaction, tipo: str):
+async def apri_sfida(interaction: discord.Interaction, tipo: str):
     tipo = tipo.lower().strip()
     if tipo not in CHALLENGE_TYPES:
         await interaction.response.send_message("Tipo non valido. Usa: dungeon o kolosseo.", ephemeral=True)
@@ -868,12 +972,12 @@ async def sfida_force_start(interaction: discord.Interaction, tipo: str):
 
 
 @bot.tree.command(
-    name="sfida_force_close",
+    name="chiudi_sfida",
     description="Marca la sfida corrente come completata.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def sfida_force_close(interaction: discord.Interaction):
+async def chiudi_sfida(interaction: discord.Interaction):
     state["state"] = "completed"
     state["kolosseo"]["signup_open"] = False
     state["auto"]["next_kolosseo_close"] = None
@@ -882,13 +986,13 @@ async def sfida_force_close(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="sfida_schedule_in",
+    name="test_apertura_sfida",
     description="Schedula un'apertura automatica di test tra X minuti.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(tipo="dungeon o kolosseo", minuti="Tra quanti minuti far partire la sfida")
-async def sfida_schedule_in(interaction: discord.Interaction, tipo: str, minuti: app_commands.Range[int, 1, 10080]):
+async def test_apertura_sfida(interaction: discord.Interaction, tipo: str, minuti: app_commands.Range[int, 1, 10080]):
     tipo = tipo.lower().strip()
     if tipo not in CHALLENGE_TYPES:
         await interaction.response.send_message("Tipo non valido. Usa: dungeon o kolosseo.", ephemeral=True)
@@ -905,13 +1009,13 @@ async def sfida_schedule_in(interaction: discord.Interaction, tipo: str, minuti:
 
 
 @bot.tree.command(
-    name="sfida_schedule_test",
+    name="test_apertura_sfida_data",
     description="Schedula un'apertura automatica di test a data e ora precise.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(tipo="dungeon o kolosseo", data_ora="Formato: YYYY-MM-DD HH:MM")
-async def sfida_schedule_test(interaction: discord.Interaction, tipo: str, data_ora: str):
+async def test_apertura_sfida_data(interaction: discord.Interaction, tipo: str, data_ora: str):
     tipo = tipo.lower().strip()
     if tipo not in CHALLENGE_TYPES:
         await interaction.response.send_message("Tipo non valido. Usa: dungeon o kolosseo.", ephemeral=True)
@@ -933,13 +1037,13 @@ async def sfida_schedule_test(interaction: discord.Interaction, tipo: str, data_
 
 
 @bot.tree.command(
-    name="kolosseo_schedule_close_in",
+    name="test_chiusura_kolosseo",
     description="Schedula la chiusura automatica di test del Kolosseo tra X minuti.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(minuti="Tra quanti minuti chiudere il Kolosseo")
-async def kolosseo_schedule_close_in(interaction: discord.Interaction, minuti: app_commands.Range[int, 1, 10080]):
+async def test_chiusura_kolosseo(interaction: discord.Interaction, minuti: app_commands.Range[int, 1, 10080]):
     run_at = now_rome() + timedelta(minutes=minuti)
     state["tests"]["scheduled_close"] = {"run_at": run_at.isoformat()}
     save_state()
@@ -951,13 +1055,13 @@ async def kolosseo_schedule_close_in(interaction: discord.Interaction, minuti: a
 
 
 @bot.tree.command(
-    name="kolosseo_schedule_close",
+    name="test_chiusura_kolosseo_data",
     description="Schedula la chiusura automatica di test del Kolosseo a data e ora precise.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(data_ora="Formato: YYYY-MM-DD HH:MM")
-async def kolosseo_schedule_close(interaction: discord.Interaction, data_ora: str):
+async def test_chiusura_kolosseo_data(interaction: discord.Interaction, data_ora: str):
     try:
         run_at = parse_local_datetime(data_ora)
     except Exception:
@@ -974,12 +1078,12 @@ async def kolosseo_schedule_close(interaction: discord.Interaction, data_ora: st
 
 
 @bot.tree.command(
-    name="scheduler_status",
+    name="stato_scheduler",
     description="Mostra i job schedulati reali e di test.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def scheduler_status(interaction: discord.Interaction):
+async def stato_scheduler(interaction: discord.Interaction):
     next_open = state.get("auto", {}).get("next_weekly_open")
     next_close = state.get("auto", {}).get("next_kolosseo_close")
     test_open = state.get("tests", {}).get("scheduled_open")
@@ -995,12 +1099,12 @@ async def scheduler_status(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="scheduler_clear",
+    name="pulisci_scheduler",
     description="Cancella tutti i job di test schedulati.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def scheduler_clear(interaction: discord.Interaction):
+async def pulisci_scheduler(interaction: discord.Interaction):
     state["tests"]["scheduled_open"] = None
     state["tests"]["scheduled_close"] = None
     save_state()
@@ -1008,24 +1112,24 @@ async def scheduler_clear(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="dungeon_start",
+    name="apri_dungeon",
     description="Apre manualmente un Dungeon Rush.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def dungeon_start(interaction: discord.Interaction):
+async def apri_dungeon(interaction: discord.Interaction):
     await open_weekly_challenge("dungeon", is_test=True)
     await interaction.response.send_message("Dungeon Rush aperto manualmente.", ephemeral=True)
 
 
 @bot.tree.command(
-    name="dungeon_set",
+    name="set_dungeon",
     description="Imposta manualmente il dungeon corrente.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(nome="Nome esatto del dungeon")
-async def dungeon_set(interaction: discord.Interaction, nome: str):
+async def set_dungeon(interaction: discord.Interaction, nome: str):
     if state.get("active_challenge") != "dungeon":
         await interaction.response.send_message("Non c'è un Dungeon Rush attivo.", ephemeral=True)
         return
@@ -1050,12 +1154,23 @@ async def dungeon_set(interaction: discord.Interaction, nome: str):
 
 
 @bot.tree.command(
-    name="dungeon_reroll",
+    name="lista_dungeon",
+    description="Mostra la lista dei dungeon disponibili.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+async def lista_dungeon(interaction: discord.Interaction):
+    text = "\n".join(f"- {d['name']} ({d['difficulty']}) → {fmt_kama(d['reward'])}" for d in DUNGEONS)
+    await interaction.response.send_message(f"**Dungeon disponibili:**\n{text}", ephemeral=True)
+
+
+@bot.tree.command(
+    name="reroll_dungeon",
     description="Riestrae il dungeon corrente.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def dungeon_reroll(interaction: discord.Interaction):
+async def reroll_dungeon(interaction: discord.Interaction):
     if state.get("active_challenge") != "dungeon":
         await interaction.response.send_message("Non c'è un Dungeon Rush attivo.", ephemeral=True)
         return
@@ -1075,7 +1190,7 @@ async def dungeon_reroll(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="dungeon_finalize",
+    name="set_vincitori_dungeon",
     description="Chiude il Dungeon Rush impostando vincitori e tempo.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
@@ -1087,7 +1202,7 @@ async def dungeon_reroll(interaction: discord.Interaction):
     vincitore4="Quarto vincitore (opzionale)",
     tempo="Tempo registrato, es: 04:32",
 )
-async def dungeon_finalize(
+async def set_vincitori_dungeon(
     interaction: discord.Interaction,
     tempo: str,
     vincitore1: discord.Member,
@@ -1109,23 +1224,23 @@ async def dungeon_finalize(
 
 
 @bot.tree.command(
-    name="kolosseo_open",
+    name="apri_kolosseo",
     description="Apre manualmente il Kolosseo.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def kolosseo_open(interaction: discord.Interaction):
+async def apri_kolosseo(interaction: discord.Interaction):
     await open_weekly_challenge("kolosseo", is_test=True)
     await interaction.response.send_message("Kolosseo aperto manualmente.", ephemeral=True)
 
 
 @bot.tree.command(
-    name="kolosseo_iscritti",
+    name="iscritti_kolosseo",
     description="Mostra gli iscritti attuali al Kolosseo.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def kolosseo_iscritti(interaction: discord.Interaction):
+async def iscritti_kolosseo(interaction: discord.Interaction):
     participants = state.get("kolosseo", {}).get("participants", [])
     if not participants:
         await interaction.response.send_message("Nessun iscritto al Kolosseo.", ephemeral=True)
@@ -1136,13 +1251,24 @@ async def kolosseo_iscritti(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="kolosseo_set_map",
+    name="mappe_kolosseo",
+    description="Mostra le mappe disponibili del Kolosseo.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@admin_only()
+async def mappe_kolosseo(interaction: discord.Interaction):
+    text = "\n".join(f"- {m}" for m in KOLOSSEO_MAPS)
+    await interaction.response.send_message(f"**Mappe Kolosseo:**\n{text}", ephemeral=True)
+
+
+@bot.tree.command(
+    name="set_mappa_kolosseo",
     description="Imposta manualmente la mappa del Kolosseo.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(nome="Nome esatto della mappa")
-async def kolosseo_set_map(interaction: discord.Interaction, nome: str):
+async def set_mappa_kolosseo(interaction: discord.Interaction, nome: str):
     if nome not in KOLOSSEO_MAPS:
         await interaction.response.send_message(
             f"Mappa non valida. Disponibili: {', '.join(KOLOSSEO_MAPS)}",
@@ -1155,13 +1281,13 @@ async def kolosseo_set_map(interaction: discord.Interaction, nome: str):
 
 
 @bot.tree.command(
-    name="kolosseo_set_champion",
+    name="set_campione",
     description="Imposta manualmente il campione del Kolosseo.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(campione="Utente da impostare come campione")
-async def kolosseo_set_champion(interaction: discord.Interaction, campione: discord.Member):
+async def set_campione(interaction: discord.Interaction, campione: discord.Member):
     state["kolosseo"]["current_champion_id"] = campione.id
     state["kolosseo"]["current_champion_name"] = str(campione.id)
     save_state()
@@ -1169,13 +1295,13 @@ async def kolosseo_set_champion(interaction: discord.Interaction, campione: disc
 
 
 @bot.tree.command(
-    name="kolosseo_set_level",
+    name="set_livello_campione",
     description="Imposta manualmente il livello del campione.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(livello="Livello campione (1-10)")
-async def kolosseo_set_level(interaction: discord.Interaction, livello: app_commands.Range[int, 1, 10]):
+async def set_livello_campione(interaction: discord.Interaction, livello: app_commands.Range[int, 1, 10]):
     state["kolosseo"]["champion_level"] = livello
     state["kolosseo"]["reward_per_win"] = get_reward_for_champion_level(livello)
     save_state()
@@ -1186,12 +1312,12 @@ async def kolosseo_set_level(interaction: discord.Interaction, livello: app_comm
 
 
 @bot.tree.command(
-    name="kolosseo_close",
+    name="chiudi_kolosseo",
     description="Chiude manualmente le iscrizioni del Kolosseo e fa il sorteggio.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def kolosseo_close(interaction: discord.Interaction):
+async def chiudi_kolosseo(interaction: discord.Interaction):
     result = await close_kolosseo_signups_and_draw()
     if result["ok"]:
         await interaction.response.send_message("Iscrizioni Kolosseo chiuse e sorteggio completato.", ephemeral=True)
@@ -1200,12 +1326,12 @@ async def kolosseo_close(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="kolosseo_draw",
+    name="sorteggia_kolosseo",
     description="Alias manuale per chiusura iscrizioni + sorteggio Kolosseo.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def kolosseo_draw(interaction: discord.Interaction):
+async def sorteggia_kolosseo(interaction: discord.Interaction):
     result = await close_kolosseo_signups_and_draw()
     if result["ok"]:
         await interaction.response.send_message("Sorteggio Kolosseo completato.", ephemeral=True)
@@ -1214,11 +1340,11 @@ async def kolosseo_draw(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="kolosseo_status",
+    name="stato_kolosseo",
     description="Mostra stato dettagliato del Kolosseo.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
-async def kolosseo_status(interaction: discord.Interaction):
+async def stato_kolosseo(interaction: discord.Interaction):
     kol = state["kolosseo"]
     participants = kol.get("participants", [])
     challengers = kol.get("challengers", [])
@@ -1237,13 +1363,13 @@ async def kolosseo_status(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="kolosseo_finalize",
+    name="set_vincitore_kolosseo",
     description="Chiude il Kolosseo impostando il campione finale.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
 @app_commands.describe(campione="Campione finale di questa edizione")
-async def kolosseo_finalize(interaction: discord.Interaction, campione: discord.Member):
+async def set_vincitore_kolosseo(interaction: discord.Interaction, campione: discord.Member):
     if state.get("active_challenge") != "kolosseo":
         await interaction.response.send_message("Non c'è un Kolosseo attivo.", ephemeral=True)
         return
@@ -1253,12 +1379,12 @@ async def kolosseo_finalize(interaction: discord.Interaction, campione: discord.
 
 
 @bot.tree.command(
-    name="kolosseo_reset",
+    name="reset_kolosseo",
     description="Resetta completamente il campione del Kolosseo.",
     guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
 )
 @admin_only()
-async def kolosseo_reset(interaction: discord.Interaction):
+async def reset_kolosseo(interaction: discord.Interaction):
     state["kolosseo"]["current_champion_id"] = None
     state["kolosseo"]["current_champion_name"] = None
     state["kolosseo"]["champion_level"] = 0
